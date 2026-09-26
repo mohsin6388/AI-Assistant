@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Deific Digital - AI Receptionist</title>
+<style>
+  :root {
+    --primary: #0d6e6e;
+    --primary-dark: #095454;
+    --bg: #f4f7f7;
+    --bubble-ai: #e8f3f3;
+    --bubble-user: #0d6e6e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    padding: 24px 16px;
+  }
+  header { text-align: center; margin-bottom: 16px; }
+  header h1 { font-size: 1.4rem; margin: 0 0 4px; color: var(--primary-dark); }
+  header p { margin: 0; color: #555; font-size: 0.9rem; }
+
+  #chat {
+    width: 100%;
+    max-width: 520px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 16px 0;
+    overflow-y: auto;
+  }
+  .bubble {
+    max-width: 80%;
+    padding: 10px 14px;
+    border-radius: 14px;
+    font-size: 0.95rem;
+    line-height: 1.35;
+  }
+  .bubble.ai {
+    background: var(--bubble-ai);
+    color: #063b3b;
+    align-self: flex-start;
+    border-bottom-left-radius: 4px;
+  }
+  .bubble.user {
+    background: var(--bubble-user);
+    color: white;
+    align-self: flex-end;
+    border-bottom-right-radius: 4px;
+  }
+  .bubble.system {
+    align-self: center;
+    background: #fff3cd;
+    color: #7a5b00;
+    font-size: 0.85rem;
+  }
+
+  #controls {
+    width: 100%;
+    max-width: 520px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    padding-top: 12px;
+  }
+  #micBtn {
+    width: 76px;
+    height: 76px;
+    border-radius: 50%;
+    border: none;
+    background: var(--primary);
+    color: white;
+    font-size: 28px;
+    cursor: pointer;
+    box-shadow: 0 4px 14px rgba(13,110,110,0.35);
+    transition: transform 0.15s ease, background 0.15s ease;
+  }
+  #micBtn:hover { background: var(--primary-dark); }
+  #micBtn.listening {
+    background: #d1453b;
+    animation: pulse 1.2s infinite;
+  }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(209,69,59,0.5); }
+    70% { box-shadow: 0 0 0 16px rgba(209,69,59,0); }
+    100% { box-shadow: 0 0 0 0 rgba(209,69,59,0); }
+  }
+  #status { font-size: 0.85rem; color: #555; min-height: 18px; }
+  #resetBtn {
+    background: none;
+    border: none;
+    color: #888;
+    font-size: 0.8rem;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  #unsupported {
+    display: none;
+    max-width: 520px;
+    background: #ffe0e0;
+    color: #7a0000;
+    padding: 12px 16px;
+    border-radius: 10px;
+    font-size: 0.9rem;
+    margin-bottom: 16px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>💻 Deific Digital — AI Receptionist</h1>
+  <p>Tap the mic and talk. Every conversation is saved to the database.</p>
+</header>
+
+<div id="unsupported">
+  Your browser doesn't support built-in speech recognition. Please open this page in
+  <strong>Google Chrome</strong> or <strong>Microsoft Edge</strong> for the mic to work.
+</div>
+
+<div id="chat"></div>
+
+<div id="controls">
+  <button id="micBtn">🎤</button>
+  <div id="status">Tap the mic to start talking</div>
+  <button id="resetBtn">Start a new conversation</button>
+</div>
+
+<script>
+const chatEl = document.getElementById('chat');
+const micBtn = document.getElementById('micBtn');
+const statusEl = document.getElementById('status');
+const resetBtn = document.getElementById('resetBtn');
+const unsupportedEl = document.getElementById('unsupported');
+
+let sessionId = crypto.randomUUID();
+let recognition = null;
+let listening = false;
+let started = false;
+let cachedVoices = [];
+
+loadVoices().then((v) => { cachedVoices = v; });
+
+function addBubble(role, text) {
+  const div = document.createElement('div');
+  div.className = 'bubble ' + role;
+  div.textContent = text;
+  chatEl.appendChild(div);
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+function loadVoices() {
+  return new Promise((resolve) => {
+    let voices = window.speechSynthesis.getVoices();
+    if (voices.length) {
+      resolve(voices);
+      return;
+    }
+    window.speechSynthesis.onvoiceschanged = () => {
+      resolve(window.speechSynthesis.getVoices());
+    };
+  });
+}
+
+// Devanagari text -> Hindi voice. Everything else (English/Hinglish in Roman letters) -> Indian English voice.
+function detectSpeechLang(text) {
+  return /[\u0900-\u097F]/.test(text) ? 'hi-IN' : 'en-IN';
+}
+
+// Try to find a female, Indian-accented voice for the given target language.
+// Edge ships "Microsoft Neerja" (en-IN) and "Microsoft Swara" (hi-IN) which are the best bet;
+// Chrome/Android usually offers "Google हिन्दी" and sometimes an en-IN "Veena"-style voice.
+function pickFemaleVoice(voices, targetLang) {
+  const femaleHints = [
+    'neerja', 'swara', 'heera', 'kalpana', 'lekha', 'veena', 'priya', 'female',
+    'google हिन्दी', 'zira', 'samantha', 'moira', 'tessa',
+  ];
+
+  const exactLang = voices.filter((v) => v.lang.toLowerCase() === targetLang.toLowerCase());
+  const indianLang = voices.filter((v) => /^(hi-in|en-in)$/i.test(v.lang));
+
+  for (const pool of [exactLang, indianLang, voices]) {
+    if (!pool.length) continue;
+    const match = pool.find((v) => femaleHints.some((h) => v.name.toLowerCase().includes(h)));
+    if (match) return match;
+  }
+
+  const fallbackPool = indianLang.length ? indianLang : voices;
+  return fallbackPool.find((v) => !/male/i.test(v.name)) || fallbackPool[0] || voices[0] || null;
+}
+
+function speak(text) {
+  return new Promise(async (resolve) => {
+    if (!cachedVoices.length) cachedVoices = await loadVoices();
+
+    const targetLang = detectSpeechLang(text);
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.rate = 1.0;
+    utter.pitch = 1.05; // slightly higher pitch reads more feminine on voices without gender info
+    utter.lang = targetLang;
+
+    const voice = pickFemaleVoice(cachedVoices, targetLang);
+    if (voice) {
+      utter.voice = voice;
+      utter.lang = voice.lang; // match the voice's own lang tag exactly for correct accent
+    }
+
+    utter.onend = resolve;
+    utter.onerror = resolve;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utter);
+  });
+}
+
+async function startConversation() {
+  statusEl.textContent = 'Connecting...';
+  try {
+    const res = await fetch('/web/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId }),
+    });
+    const data = await res.json();
+    addBubble('ai', data.reply);
+    statusEl.textContent = 'Tap the mic to reply';
+    started = true;
+    await speak(data.reply);
+  } catch (err) {
+    addBubble('system', 'Could not reach the server. Is it running?');
+    console.error(err);
+  }
+}
+
+async function sendMessage(text) {
+  addBubble('user', text);
+  statusEl.textContent = 'Thinking...';
+  try {
+    const res = await fetch('/web/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId, message: text }),
+    });
+    const data = await res.json();
+    if (data.error) {
+      addBubble('system', 'Error: ' + data.error);
+      statusEl.textContent = 'Something went wrong — tap mic to retry';
+      return;
+    }
+    addBubble('ai', data.reply);
+    if (data.leadCaptured) {
+      addBubble('system', '✅ Lead saved to database');
+    }
+    statusEl.textContent = 'Tap the mic to reply';
+    await speak(data.reply);
+  } catch (err) {
+    addBubble('system', 'Could not reach the server.');
+    console.error(err);
+    statusEl.textContent = 'Tap the mic to retry';
+  }
+}
+
+function setupRecognition() {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    unsupportedEl.style.display = 'block';
+    micBtn.disabled = true;
+    return null;
+  }
+  const rec = new SpeechRecognition();
+  rec.lang = 'en-IN';
+  rec.interimResults = false;
+  rec.maxAlternatives = 1;
+
+  rec.onstart = () => {
+    listening = true;
+    micBtn.classList.add('listening');
+    statusEl.textContent = 'Listening... speak now';
+  };
+
+  rec.onresult = (event) => {
+    const transcript = event.results[0][0].transcript;
+    sendMessage(transcript);
+  };
+
+  rec.onerror = (event) => {
+    console.error('Speech recognition error:', event.error);
+    statusEl.textContent = 'Mic error (' + event.error + ') — tap to retry';
+  };
+
+  rec.onend = () => {
+    listening = false;
+    micBtn.classList.remove('listening');
+  };
+
+  return rec;
+}
+
+micBtn.addEventListener('click', async () => {
+  if (!recognition) return;
+  if (!started) {
+    await startConversation();
+  }
+  if (listening) {
+    recognition.stop();
+    return;
+  }
+  window.speechSynthesis.cancel();
+  recognition.start();
+});
+
+resetBtn.addEventListener('click', () => {
+  sessionId = crypto.randomUUID();
+  started = false;
+  chatEl.innerHTML = '';
+  statusEl.textContent = 'Tap the mic to start talking';
+});
+
+recognition = setupRecognition();
+</script>
+
+</body>
+</html>
